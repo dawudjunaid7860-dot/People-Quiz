@@ -320,6 +320,17 @@
     <button class="btn" id="nameNextBtn" disabled>next →</button>
   </div>
 
+  <!-- Screen: personal boy/girl pick (only changes things for THIS visitor) -->
+  <div class="screen" id="screen-visitor-gender">
+    <div class="result-emoji">🙋</div>
+    <h1 style="font-size:1.4em;">quick one — boy or girl?</h1>
+    <p class="sub">this just picks your own colors + vibe, just for you</p>
+    <div class="options">
+      <div class="option" id="visitorGirlBtn">👧 Girl</div>
+      <div class="option" id="visitorBoyBtn">👦 Boy</div>
+    </div>
+  </div>
+
   <!-- Question screens get inserted here by JS -->
   <div id="quiz-container"></div>
 
@@ -374,11 +385,21 @@
     </div>
 
     <div class="admin-section">
-      <h3>✏️ Edit questions (changes for everyone)</h3>
-      <div id="questionsEditor"></div>
-      <button class="btn small secondary" id="addQuestionBtn">+ add question</button>
-      <br>
-      <button class="btn" id="saveQuestionsBtn" style="margin-top:14px;">save questions</button>
+      <h3>📋 Question presets (pick one → everyone gets it)</h3>
+      <select id="presetSelect" style="width:100%; padding:10px; border-radius:14px; border:2px solid var(--option-border); font-family:'Quicksand',sans-serif; font-weight:700; color:var(--accent-dark); margin-bottom:10px;">
+      </select>
+      <div style="display:flex; gap:8px; margin-bottom:10px;">
+        <button class="btn small secondary" id="newPresetBtn" style="flex:1;">➕ new preset</button>
+        <button class="btn small secondary" id="deletePresetBtn" style="flex:1;">🗑️ delete preset</button>
+      </div>
+
+      <details>
+        <summary style="cursor:pointer; font-weight:700; color:var(--accent-dark); margin-bottom:8px;">✏️ edit questions in this preset</summary>
+        <div id="questionsEditor" style="margin-top:10px;"></div>
+        <button class="btn small secondary" id="addQuestionBtn">+ add question</button>
+      </details>
+
+      <button class="btn" id="saveQuestionsBtn" style="margin-top:14px;">save changes to this preset</button>
     </div>
   </div>
 </div>
@@ -453,6 +474,8 @@ const DEFAULT_QUESTIONS = [
 let questions = JSON.parse(JSON.stringify(DEFAULT_QUESTIONS));
 let currentTheme = "pink";
 let currentGender = "girl";
+let adminBaseTheme = "pink";
+let adminBaseGender = "girl";
 let answers = [];
 let visitorName = "";
 let firebaseReady = false;
@@ -508,17 +531,26 @@ function startApp() {
           const data = doc.data();
           if (data.questions) questions = data.questions;
           const g = data.gender || 'girl';
-          applyTheme(data.theme || COPY[g].defaultTheme);
+          const t = data.theme || COPY[g].defaultTheme;
+          applyTheme(t);
           applyCopy(g);
+          adminBaseTheme = t;
+          adminBaseGender = g;
         } else {
           applyTheme('pink');
           applyCopy('girl');
+          adminBaseTheme = 'pink';
+          adminBaseGender = 'girl';
           configRef.set({ questions: questions, theme: 'pink', gender: 'girl' });
         }
         buildQuiz();
         showScreen('screen-name');
+      } else if (doc.metadata.hasPendingWrites) {
+        // this is our own save still in flight to the server — don't reload,
+        // it's already showing correctly on screen, just let it finish saving
+        return;
       } else {
-        // config changed remotely -> refresh so everyone sees new stuff
+        // a confirmed change from somewhere else (or our own save finished) -> refresh
         location.reload();
       }
     }, (err) => {
@@ -629,6 +661,7 @@ function buildResult() {
   if (firebaseReady) {
     db.collection('submissions').add({
       name: visitorName,
+      gender: visitorGenderPick || "",
       responses: questions.map((item, i) => ({ question: item.q, answer: answers[i] || "" })),
       timestamp: firebase.firestore.FieldValue.serverTimestamp()
     }).catch(e => console.warn("couldn't save submission:", e));
@@ -643,15 +676,33 @@ nameInput.addEventListener('input', () => {
 });
 nameNextBtn.addEventListener('click', () => {
   visitorName = nameInput.value.trim();
-  showScreen('screen-q0');
+  showScreen('screen-visitor-gender');
 });
 nameInput.addEventListener('keypress', (e) => {
   if (e.key === 'Enter' && !nameNextBtn.disabled) nameNextBtn.click();
 });
 
+// ---- personal boy/girl pick screen (local only, never saved to admin config) ----
+let visitorGenderPick = "";
+document.getElementById('visitorGirlBtn').addEventListener('click', () => {
+  visitorGenderPick = "girl";
+  applyTheme(COPY.girl.defaultTheme);
+  applyCopy('girl');
+  showScreen('screen-q0');
+});
+document.getElementById('visitorBoyBtn').addEventListener('click', () => {
+  visitorGenderPick = "boy";
+  applyTheme(COPY.boy.defaultTheme);
+  applyCopy('boy');
+  showScreen('screen-q0');
+});
+
 document.getElementById('restartBtn').addEventListener('click', () => {
   nameInput.value = "";
   nameNextBtn.disabled = true;
+  visitorGenderPick = "";
+  applyTheme(adminBaseTheme);
+  applyCopy(adminBaseGender);
   showScreen('screen-name');
 });
 
@@ -681,9 +732,13 @@ function checkPassword() {
 }
 
 function openAdminPanel() {
+  // show the real saved default, not any visitor's personal pick from this session
+  applyTheme(adminBaseTheme);
+  applyCopy(adminBaseGender);
   renderColorSwatches();
   renderQuestionsEditor();
   loadSubmissions();
+  loadPresets();
   highlightGenderButtons();
   openModal('adminModal');
 }
@@ -712,7 +767,11 @@ document.getElementById('boyModeBtn').addEventListener('click', () => {
 document.getElementById('saveGenderBtn').addEventListener('click', () => {
   if (firebaseReady) {
     db.collection('config').doc('site').set({ gender: currentGender, theme: currentTheme }, { merge: true })
-      .then(() => alert("saved! " + (currentGender === 'boy' ? "👦" : "👧") + " everyone will get the new vibe"))
+      .then(() => {
+        adminBaseGender = currentGender;
+        adminBaseTheme = currentTheme;
+        alert("saved! " + (currentGender === 'boy' ? "👦" : "👧") + " everyone will get the new vibe");
+      })
       .catch(e => alert("couldn't save: " + e.message));
   } else {
     alert("connect Firebase first for this to save for everyone!");
@@ -741,7 +800,10 @@ function renderColorSwatches() {
 document.getElementById('saveColorBtn').addEventListener('click', () => {
   if (firebaseReady) {
     db.collection('config').doc('site').set({ theme: currentTheme }, { merge: true })
-      .then(() => alert("saved! 🎨 (this device won't auto-reload, but yours + your cousin's will next time)"))
+      .then(() => {
+        adminBaseTheme = currentTheme;
+        alert("saved! 🎨 everyone will get this color");
+      })
       .catch(e => alert("couldn't save: " + e.message));
   } else {
     alert("connect Firebase first for this to save for everyone!");
@@ -801,14 +863,93 @@ document.getElementById('saveQuestionsBtn').addEventListener('click', () => {
   });
   questions = newQuestions;
 
-  if (firebaseReady) {
-    db.collection('config').doc('site').set({ questions: questions }, { merge: true })
-      .then(() => alert("saved! ✏️ everyone will get the new questions"))
-      .catch(e => alert("couldn't save: " + e.message));
-  } else {
+  if (!firebaseReady) {
     alert("connect Firebase first for this to save for everyone!");
     buildQuiz();
+    return;
   }
+
+  const tasks = [
+    db.collection('config').doc('site').set({ questions: questions }, { merge: true })
+  ];
+  if (currentPresetId) {
+    tasks.push(db.collection('presets').doc(currentPresetId).set({ questions: questions }, { merge: true }));
+  }
+  Promise.all(tasks)
+    .then(() => alert("saved! ✏️ this preset is updated and live for everyone"))
+    .catch(e => alert("couldn't save: " + e.message));
+});
+
+// ================= QUESTION PRESETS =================
+let currentPresetId = null;
+
+function loadPresets() {
+  const select = document.getElementById('presetSelect');
+  if (!firebaseReady) {
+    select.innerHTML = "<option>connect Firebase to use presets</option>";
+    return;
+  }
+  db.collection('presets').get().then(snap => {
+    if (snap.empty) {
+      // seed the default preset from the questions we brainstormed together
+      db.collection('presets').add({ name: "Classic Cousin Questions", questions: DEFAULT_QUESTIONS })
+        .then(() => loadPresets());
+      return;
+    }
+    select.innerHTML = "";
+    let firstId = null;
+    snap.forEach(doc => {
+      if (!firstId) firstId = doc.id;
+      const opt = document.createElement('option');
+      opt.value = doc.id;
+      opt.textContent = doc.data().name || "Untitled preset";
+      select.appendChild(opt);
+    });
+    // try to keep whichever preset matches the currently active questions, else pick the first
+    currentPresetId = select.value || firstId;
+    select.value = currentPresetId;
+  }).catch(e => {
+    select.innerHTML = "<option>error loading presets</option>";
+    console.warn(e);
+  });
+}
+
+document.getElementById('presetSelect').addEventListener('change', (e) => {
+  const presetId = e.target.value;
+  currentPresetId = presetId;
+  db.collection('presets').doc(presetId).get().then(doc => {
+    if (!doc.exists) return;
+    questions = JSON.parse(JSON.stringify(doc.data().questions || []));
+    renderQuestionsEditor();
+    buildQuiz();
+    // publish immediately so everyone gets this preset's questions
+    db.collection('config').doc('site').set({ questions: questions }, { merge: true })
+      .then(() => alert(`applied! everyone now sees "${doc.data().name}" 📋`))
+      .catch(err => alert("couldn't publish: " + err.message));
+  });
+});
+
+document.getElementById('newPresetBtn').addEventListener('click', () => {
+  const name = prompt("name for this new preset:");
+  if (!name) return;
+  if (!firebaseReady) {
+    alert("connect Firebase first for this to work!");
+    return;
+  }
+  db.collection('presets').add({ name: name, questions: questions }).then((docRef) => {
+    currentPresetId = docRef.id;
+    loadPresets();
+    alert(`"${name}" preset created and saved!`);
+  }).catch(e => alert("couldn't save: " + e.message));
+});
+
+document.getElementById('deletePresetBtn').addEventListener('click', () => {
+  if (!currentPresetId) return;
+  if (!confirm("delete this preset? this can't be undone")) return;
+  db.collection('presets').doc(currentPresetId).delete().then(() => {
+    currentPresetId = null;
+    loadPresets();
+  }).catch(e => alert("couldn't delete: " + e.message));
 });
 
 function loadSubmissions() {
@@ -830,9 +971,21 @@ function loadSubmissions() {
       const d = doc.data();
       const card = document.createElement('div');
       card.className = 'submission-card';
+      card.style.position = 'relative';
       const responseLines = (d.responses || []).map(r => `${r.question} <b>${r.answer}</b>`).join('<br>');
-      card.innerHTML = `<b>${d.name || 'unknown'}</b><br>${responseLines}`;
+      const genderTag = d.gender ? ` <span style="opacity:0.6;">(${d.gender})</span>` : '';
+      card.innerHTML = `
+        <button class="remove-submission" data-id="${doc.id}" title="remove" style="float:right; background:#ffe0e0; color:#cc3333; border:none; border-radius:8px; padding:2px 8px; cursor:pointer; font-size:0.85em;">✕</button>
+        <b>${d.name || 'unknown'}</b>${genderTag}<br>${responseLines}
+      `;
       list.appendChild(card);
+    });
+    list.querySelectorAll('.remove-submission').forEach(btn => {
+      btn.addEventListener('click', () => {
+        if (confirm("remove this person from the list?")) {
+          db.collection('submissions').doc(btn.dataset.id).delete().then(loadSubmissions);
+        }
+      });
     });
   }).catch(e => {
     list.innerHTML = "<p style='color:#cc3333;'>error loading: " + e.message + "</p>";
