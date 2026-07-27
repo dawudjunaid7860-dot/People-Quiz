@@ -549,8 +549,12 @@ function startApp() {
         // this is our own save still in flight to the server — don't reload,
         // it's already showing correctly on screen, just let it finish saving
         return;
+      } else if (document.getElementById('adminModal').classList.contains('active')) {
+        // admin is actively working in the panel right now — don't yank the page
+        // out from under them, they already see their own change applied live
+        return;
       } else {
-        // a confirmed change from somewhere else (or our own save finished) -> refresh
+        // a confirmed change from somewhere else -> refresh so this visitor sees it
         location.reload();
       }
     }, (err) => {
@@ -810,6 +814,26 @@ document.getElementById('saveColorBtn').addEventListener('click', () => {
   }
 });
 
+function syncQuestionsFromEditorDOM() {
+  // pulls whatever the admin has currently typed/selected in the editor
+  // back into the `questions` array, so nothing gets lost when adding/removing rows
+  const rows = document.querySelectorAll('#questionsEditor .q-edit-row');
+  if (rows.length === 0) return; // editor hasn't been rendered yet, nothing to sync
+  const synced = [];
+  rows.forEach(row => {
+    const q = row.querySelector('.edit-q-text').value.trim();
+    const type = row.querySelector('.edit-q-type').value;
+    const emoji = row.querySelector('.edit-q-emoji').value.trim() || "❓";
+    const optionsRaw = row.querySelector('.edit-q-options').value.trim();
+    const options = optionsRaw ? optionsRaw.split(',').map(o => o.trim()).filter(Boolean) : [];
+    const item = { type, q, emoji };
+    if (type === 'choice') item.options = options.length ? options : ["Option 1", "Option 2"];
+    else item.placeholder = "type your answer...";
+    synced.push(item);
+  });
+  questions = synced;
+}
+
 function renderQuestionsEditor() {
   const wrap = document.getElementById('questionsEditor');
   wrap.innerHTML = "";
@@ -826,15 +850,25 @@ function renderQuestionsEditor() {
       </select>
       <label>Emoji</label>
       <input type="text" class="edit-q-emoji" value="${q.emoji || ''}" maxlength="4">
-      <label>Options (comma separated, only used for multiple choice)</label>
-      <input type="text" class="edit-q-options" value="${(q.options || []).join(', ')}">
+      <div class="options-field-wrap" style="${q.type === 'text' ? 'display:none;' : ''}">
+        <label>Options (comma separated)</label>
+        <input type="text" class="edit-q-options" value="${(q.options || []).join(', ')}">
+      </div>
       <button class="remove-q" data-index="${i}">remove question</button>
     `;
     wrap.appendChild(row);
+
+    // show/hide the options field live as the admin changes the type dropdown
+    const typeSelect = row.querySelector('.edit-q-type');
+    const optionsWrap = row.querySelector('.options-field-wrap');
+    typeSelect.addEventListener('change', () => {
+      optionsWrap.style.display = typeSelect.value === 'text' ? 'none' : 'block';
+    });
   });
 
   wrap.querySelectorAll('.remove-q').forEach(btn => {
     btn.addEventListener('click', () => {
+      syncQuestionsFromEditorDOM();
       const idx = parseInt(btn.dataset.index);
       questions.splice(idx, 1);
       renderQuestionsEditor();
@@ -843,25 +877,13 @@ function renderQuestionsEditor() {
 }
 
 document.getElementById('addQuestionBtn').addEventListener('click', () => {
+  syncQuestionsFromEditorDOM();
   questions.push({ type: "choice", q: "New question?", emoji: "❓", options: ["Option 1", "Option 2"] });
   renderQuestionsEditor();
 });
 
 document.getElementById('saveQuestionsBtn').addEventListener('click', () => {
-  const rows = document.querySelectorAll('#questionsEditor .q-edit-row');
-  const newQuestions = [];
-  rows.forEach(row => {
-    const q = row.querySelector('.edit-q-text').value.trim();
-    const type = row.querySelector('.edit-q-type').value;
-    const emoji = row.querySelector('.edit-q-emoji').value.trim() || "❓";
-    const optionsRaw = row.querySelector('.edit-q-options').value.trim();
-    const options = optionsRaw ? optionsRaw.split(',').map(o => o.trim()).filter(Boolean) : [];
-    const item = { type, q, emoji };
-    if (type === 'choice') item.options = options.length ? options : ["Option 1", "Option 2"];
-    else item.placeholder = "type your answer...";
-    newQuestions.push(item);
-  });
-  questions = newQuestions;
+  syncQuestionsFromEditorDOM();
 
   if (!firebaseReady) {
     alert("connect Firebase first for this to save for everyone!");
@@ -869,15 +891,23 @@ document.getElementById('saveQuestionsBtn').addEventListener('click', () => {
     return;
   }
 
-  const tasks = [
-    db.collection('config').doc('site').set({ questions: questions }, { merge: true })
-  ];
-  if (currentPresetId) {
-    tasks.push(db.collection('presets').doc(currentPresetId).set({ questions: questions }, { merge: true }));
-  }
-  Promise.all(tasks)
-    .then(() => alert("saved! ✏️ this preset is updated and live for everyone"))
-    .catch(e => alert("couldn't save: " + e.message));
+  const siteWrite = db.collection('config').doc('site').set({ questions: questions }, { merge: true });
+  const presetWrite = currentPresetId
+    ? db.collection('presets').doc(currentPresetId).set({ questions: questions }, { merge: true })
+    : Promise.resolve('no-preset-selected');
+
+  Promise.allSettled([siteWrite, presetWrite]).then(([siteResult, presetResult]) => {
+    if (siteResult.status === 'rejected') {
+      alert("⚠️ couldn't save live site questions: " + siteResult.reason.message + "\n\n(check that your Firestore rules allow writes to /config/{docId})");
+      return;
+    }
+    if (presetResult.status === 'rejected') {
+      alert("saved live for everyone ✅ — but couldn't update the preset itself: " + presetResult.reason.message + "\n\n(check that your Firestore rules allow writes to /presets/{docId})");
+      return;
+    }
+    alert("saved! ✏️ this preset is updated and live for everyone");
+  });
+  buildQuiz();
 });
 
 // ================= QUESTION PRESETS =================
@@ -909,8 +939,8 @@ function loadPresets() {
     currentPresetId = select.value || firstId;
     select.value = currentPresetId;
   }).catch(e => {
-    select.innerHTML = "<option>error loading presets</option>";
-    console.warn(e);
+    select.innerHTML = "<option>⚠️ can't load presets — check Firestore rules</option>";
+    console.warn("Presets permission/load error:", e);
   });
 }
 
